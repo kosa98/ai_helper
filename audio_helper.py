@@ -9,6 +9,7 @@ from faster_whisper import WhisperModel
 # Импортируем твои модули
 from llm_client import LMStudioClient
 from voice_assistant import VoiceAssistant
+from browser_manager import BrowserManager  # <-- Новый импорт
 
 # --- КОНФИГУРАЦИЯ ---
 SAMPLE_RATE = 44100  
@@ -17,10 +18,10 @@ MODEL_SIZE = "small"
 
 # Инициализация компонентов
 print(f"⏳ Загрузка системы (Whisper {MODEL_SIZE})...")
-# Для Mac на Apple Silicon (M1/M2/M3) используем CPU и int8 для скорости
 whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 llm = LMStudioClient()
 speaker = VoiceAssistant(voice="Milena")
+browser_tool = BrowserManager()  # <-- Инициализация браузера
 
 # Глобальные переменные состояния
 is_recording = False
@@ -58,7 +59,7 @@ def start_capture():
         is_recording = False
 
 def stop_capture():
-    """Остановка записи и запуск цепочки Whisper -> LLM -> Voice."""
+    """Остановка записи и запуск цепочки Whisper -> Logic -> Voice."""
     global is_recording, audio_stream_thread, recording_frames
     if not is_recording: return
 
@@ -86,8 +87,7 @@ def stop_capture():
         segments, info = whisper_model.transcribe(
             OUTPUT_AUDIO_FILE, 
             beam_size=5, 
-            # Промпт помогает Whisper понимать специфичные названия
-            initial_prompt="Qwen, LLM, Python, AI, LM Studio, JSON, API, MacBook, Whisper.",
+            initial_prompt="Qwen, LLM, Python, AI, LM Studio, Яндекс Музыка, включи, поставь.",
             vad_filter=True
         )
         user_text = "".join([segment.text for segment in segments]).strip()
@@ -95,12 +95,30 @@ def stop_capture():
         if user_text:
             print(f"🎙️ Вы: {user_text}")
             
-            # 3. Запрос к LM Studio (с поддержкой истории диалога)
-            ai_response = llm.send_prompt(user_text)
-            print(f"\n🤖 AI: {ai_response}")
+            # --- ЛОГИКА КОМАНД ---
+            lower_text = user_text.lower()
+            trigger_words = ["хуй", "влад", "алиса", "музыка", "включи", "поставь", "запусти песню", "найди трек"]
             
-            # 4. Озвучка ответа
-            speaker.speak(ai_response)
+            # Проверяем, есть ли запрос на музыку
+            is_music_command = any(word in lower_text for word in trigger_words)
+            
+            if is_music_command:
+                # Вырезаем название трека, убирая триггерные слова
+                song_query = lower_text
+                for word in trigger_words:
+                    song_query = song_query.replace(word, "")
+                song_query = song_query.strip()
+                
+                if song_query:
+                    speaker.speak(f"Секунду, ищу {song_query} на Яндекс Музыке.")
+                    browser_tool.play_yandex_music(song_query)
+                else:
+                    speaker.speak("Какую песню нужно включить?")
+            else:
+                # 3. Обычный диалог с LM Studio
+                ai_response = llm.send_prompt(user_text)
+                print(f"\n🤖 AI: {ai_response}")
+                speaker.speak(ai_response)
         else:
             print("😶 Речь не обнаружена.")
 
@@ -115,17 +133,12 @@ def on_press(key):
     """Обработка нажатий клавиш."""
     try:
         if hasattr(key, 'char'):
-            # U - Начать запись
             if key.char == 'u':
                 if not is_recording:
                     start_capture()
-            
-            # M - Прервать озвучку
             elif key.char == 'm':
                 speaker.stop()
                 print("🔇 Озвучка прервана")
-            
-            # L - Очистить память диалога
             elif key.char == 'l':
                 llm.clear_history()
                 speaker.speak("Память очищена, слушаю тебя.")
@@ -137,14 +150,13 @@ def on_press(key):
 def on_release(key):
     """Обработка отпускания клавиш."""
     try:
-        # J - Остановить запись
         if hasattr(key, 'char') and key.char == 'j':
             if is_recording:
                 stop_capture()
         
-        # Esc - Выход
         if key == keyboard.Key.esc:
             speaker.stop()
+            browser_tool.close_browser() # Корректно закрываем браузер при выходе
             print("👋 Пока!")
             return False
     except Exception:
@@ -152,12 +164,12 @@ def on_release(key):
 
 def main():
     print("==================================================")
-    print("   ГОЛОСОВОЙ ПОМОЩНИК С ПАМЯТЬЮ")
+    print("   AI ASSISTANT: ГОЛОС + ПАМЯТЬ + ИНТЕРНЕТ")
     print("--------------------------------------------------")
-    print("   U (удерживай/нажми) -> ЗАПИСЬ")
-    print("   J (нажми)           -> ОТПРАВИТЬ")
-    print("   M (нажми)           -> ЗАМОЛЧАТЬ")
-    print("   L (нажми)           -> СБРОСИТЬ КОНТЕКСТ")
+    print("   U (удерживай) -> ЗАПИСЬ")
+    print("   J (нажми)     -> ОТПРАВИТЬ")
+    print("   M (нажми)     -> ПРЕРВАТЬ ГОЛОС")
+    print("   L (нажми)     -> ОЧИСТИТЬ ПАМЯТЬ")
     print("==================================================")
     
     with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
