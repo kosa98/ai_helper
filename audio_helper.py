@@ -6,174 +6,121 @@ import soundfile as sf
 from pynput import keyboard
 from faster_whisper import WhisperModel
 
-# Импортируем твои модули
+# Твои модули
 from llm_client import LMStudioClient
 from voice_assistant import VoiceAssistant
-from browser_manager import BrowserManager  # <-- Новый импорт
+from browser_manager import BrowserManager
+from terminal_executor import TerminalExecutor
 
 # --- КОНФИГУРАЦИЯ ---
 SAMPLE_RATE = 44100  
 OUTPUT_AUDIO_FILE = "temp_recorded_audio.wav"
 MODEL_SIZE = "small" 
+AI_WORKSPACE = "."
 
-# Инициализация компонентов
-print(f"⏳ Загрузка системы (Whisper {MODEL_SIZE})...")
+# Инициализация
+print(f"⏳ Запуск системы (Whisper {MODEL_SIZE})...")
 whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 llm = LMStudioClient()
 speaker = VoiceAssistant(voice="Milena")
-browser_tool = BrowserManager()  # <-- Инициализация браузера
+browser_tool = BrowserManager()
+terminal_tool = TerminalExecutor(working_dir=AI_WORKSPACE, user="ai_helper")
 
-# Глобальные переменные состояния
 is_recording = False
 recording_frames = []
 audio_stream_thread = None
 
 def audio_callback(indata, frames, time, status):
-    """Захват аудио-фреймов в буфер."""
-    global recording_frames
     if is_recording:
         recording_frames.append(np.copy(indata))
 
 def start_capture():
-    """Запуск записи и МГНОВЕННАЯ остановка текущей озвучки."""
     global is_recording, recording_frames, audio_stream_thread
     if is_recording: return
-    
-    # Авто-стоп: замолкаем сразу, как только ты нажал кнопку записи
     speaker.stop() 
-    
     print("\n🔴 СЛУШАЮ...")
     is_recording = True
     recording_frames.clear()
-
-    try:
-        audio_stream_thread = sd.InputStream(
-            samplerate=SAMPLE_RATE, 
-            blocksize=1024, 
-            dtype='float32', 
-            callback=audio_callback
-        )
-        audio_stream_thread.start()
-    except Exception as e:
-        print(f"🚨 Ошибка микрофона: {e}")
-        is_recording = False
+    audio_stream_thread = sd.InputStream(samplerate=SAMPLE_RATE, blocksize=1024, dtype='float32', callback=audio_callback)
+    audio_stream_thread.start()
 
 def stop_capture():
-    """Остановка записи и запуск цепочки Whisper -> Logic -> Voice."""
     global is_recording, audio_stream_thread, recording_frames
     if not is_recording: return
-
     print("\n🛑 СТОП. Обработка...")
     is_recording = False
-    
     if audio_stream_thread:
         audio_stream_thread.stop()
         audio_stream_thread.close()
         audio_stream_thread = None
         
-    time.sleep(0.2) 
-
-    if not recording_frames:
-        print("🤔 Аудио не захвачено.")
-        return
+    if not recording_frames: return
         
     try:
-        # 1. Сохранение аудио во временный файл
         audio_data = np.concatenate(recording_frames, axis=0)
         sf.write(OUTPUT_AUDIO_FILE, audio_data, SAMPLE_RATE)
 
-        # 2. Распознавание (Faster-Whisper)
         print("🧠 Распознаю речь...")
-        segments, info = whisper_model.transcribe(
-            OUTPUT_AUDIO_FILE, 
-            beam_size=5, 
-            initial_prompt="Qwen, LLM, Python, AI, LM Studio, Яндекс Музыка, включи, поставь.",
-            vad_filter=True
-        )
-        user_text = "".join([segment.text for segment in segments]).strip()
+        segments, _ = whisper_model.transcribe(OUTPUT_AUDIO_FILE, beam_size=5, vad_filter=True)
+        user_text = "".join([s.text for s in segments]).strip()
         
         if user_text:
             print(f"🎙️ Вы: {user_text}")
             
-            # --- ЛОГИКА КОМАНД ---
-            lower_text = user_text.lower()
-            trigger_words = ["хуй", "влад", "алиса", "музыка", "включи", "поставь", "запусти песню", "найди трек"]
+            # Системная инструкция для Gemma
+            system_instruction = """
+            Ты — автономный агент. Твои инструменты:
+            1. ACTION: [MUSIC] PARAMS: название песни (для Яндекс Музыки)
+            2. ACTION: [TERMINAL] PARAMS: bash команда (для управления файлами и кодом)
+            3. ACTION: [CHAT] PARAMS: текст ответа (просто общение)
             
-            # Проверяем, есть ли запрос на музыку
-            is_music_command = any(word in lower_text for word in trigger_words)
+            Отвечай строго начиная с ACTION.
+            """
             
-            if is_music_command:
-                # Вырезаем название трека, убирая триггерные слова
-                song_query = lower_text
-                for word in trigger_words:
-                    song_query = song_query.replace(word, "")
-                song_query = song_query.strip()
+            full_prompt = f"{system_instruction}\n\nЗапрос пользователя: {user_text}"
+            ai_response = llm.send_prompt(full_prompt)
+            print(f"\n🤖 AI: {ai_response}")
+
+            # Разбор ответа
+            if "ACTION: [MUSIC]" in ai_response:
+                song = ai_response.split("PARAMS:")[1].strip()
+                speaker.speak(f"Ищу музыку: {song}")
+                browser_tool.play_yandex_music(song)
+
+            elif "ACTION: [TERMINAL]" in ai_response:
+                cmd = ai_response.split("PARAMS:")[1].strip()
+                speaker.speak("Работаю с терминалом.")
+                res = terminal_tool.execute(cmd)
                 
-                if song_query:
-                    speaker.speak(f"Секунду, ищу {song_query} на Яндекс Музыке.")
-                    browser_tool.play_yandex_music(song_query)
-                else:
-                    speaker.speak("Какую песню нужно включить?")
+                feedback = f"Команда: {cmd}\nРезультат: {res.get('stdout') or res.get('stderr')}"
+                summary = llm.send_prompt(f"Кратко расскажи пользователю результат операции: {feedback}")
+                speaker.speak(summary)
+
             else:
-                # 3. Обычный диалог с LM Studio
-                ai_response = llm.send_prompt(user_text)
-                print(f"\n🤖 AI: {ai_response}")
-                speaker.speak(ai_response)
-        else:
-            print("😶 Речь не обнаружена.")
-
+                # Обычный чат
+                clean_reply = ai_response.replace("ACTION: [CHAT]", "").replace("PARAMS:", "").strip()
+                speaker.speak(clean_reply)
+        
     except Exception as e:
-        print(f"❌ Ошибка в цепочке: {e}")
+        print(f"❌ Ошибка: {e}")
     finally:
-        if os.path.exists(OUTPUT_AUDIO_FILE):
-            os.remove(OUTPUT_AUDIO_FILE)
-        print("\n>>> Готов (U - говорить, J - отправить, M - замолчать, L - сброс памяти)")
+        if os.path.exists(OUTPUT_AUDIO_FILE): os.remove(OUTPUT_AUDIO_FILE)
 
+# --- Управление клавишами (U - запись, J - стоп/отправить) ---
 def on_press(key):
-    """Обработка нажатий клавиш."""
     try:
         if hasattr(key, 'char'):
-            if key.char == 'u':
-                if not is_recording:
-                    start_capture()
-            elif key.char == 'm':
-                speaker.stop()
-                print("🔇 Озвучка прервана")
-            elif key.char == 'l':
-                llm.clear_history()
-                speaker.speak("Память очищена, слушаю тебя.")
-                print("🧹 История диалога сброшена")
-                
-    except Exception:
-        pass
+            if key.char == 'u': start_capture()
+            if key.char == 'm': speaker.stop()
+    except: pass
 
 def on_release(key):
-    """Обработка отпускания клавиш."""
     try:
-        if hasattr(key, 'char') and key.char == 'j':
-            if is_recording:
-                stop_capture()
-        
-        if key == keyboard.Key.esc:
-            speaker.stop()
-            browser_tool.close_browser() # Корректно закрываем браузер при выходе
-            print("👋 Пока!")
-            return False
-    except Exception:
-        pass
-
-def main():
-    print("==================================================")
-    print("   AI ASSISTANT: ГОЛОС + ПАМЯТЬ + ИНТЕРНЕТ")
-    print("--------------------------------------------------")
-    print("   U (удерживай) -> ЗАПИСЬ")
-    print("   J (нажми)     -> ОТПРАВИТЬ")
-    print("   M (нажми)     -> ПРЕРВАТЬ ГОЛОС")
-    print("   L (нажми)     -> ОЧИСТИТЬ ПАМЯТЬ")
-    print("==================================================")
-    
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
+        if hasattr(key, 'char') and key.char == 'j': stop_capture()
+        if key == keyboard.Key.esc: return False
+    except: pass
 
 if __name__ == "__main__":
-    main()
+    print("🚀 Джарвис готов. Зажми 'U' чтобы сказать, 'J' чтобы отправить.")
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
