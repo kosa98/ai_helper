@@ -18,7 +18,7 @@ from terminal_executor import TerminalExecutor
 SAMPLE_RATE = 44100  
 OUTPUT_AUDIO_FILE = "temp_recorded_audio.wav"
 MODEL_SIZE = "small" 
-AI_WORKSPACE = "." # Путь к песочнице
+AI_WORKSPACE = "." 
 
 # Инициализация компонентов
 print(f"⏳ Загрузка систем (Whisper {MODEL_SIZE})...")
@@ -44,6 +44,8 @@ def process_command(user_text):
     ACTION: [TERMINAL] PARAMS: bash команда
     ACTION: [WRITE_FILE] PARAMS: filename | content
     ACTION: [CHAT] PARAMS: текст ответа
+    
+    ВАЖНО: Пиши команды БЕЗ обратных кавычек вокруг них, не пропускай ключевые слова ACTION, PARAMS, а так же | там где это нужно.
     """
     
     try:
@@ -51,40 +53,54 @@ def process_command(user_text):
         ai_response = llm.send_prompt(full_prompt)
         print(f"🤖 AI Response:\n{ai_response}")
 
-        # Используем регулярку, чтобы найти все ACTION, даже если они в куче текста
-        # Ищет паттерн: ACTION: [ТИП] PARAMS: данные
+        # Улучшенная регулярка: ищет ACTION и PARAMS, игнорируя возможные кавычки вокруг них
+        # Группа 1: Тип команды, Группа 2: Все параметры
         actions = re.findall(r"ACTION:\s*\[(.*?)\]\s*PARAMS:\s*(.*)", ai_response)
 
         for action_type, params in actions:
             action_type = action_type.strip()
-            params = params.strip()
+            # Очищаем параметры от "внешних" кавычек Markdown (если ИИ обернул всю строку)
+            # Мы используем rstrip/lstrip только для крайних символов `
+            clean_params = params.strip().rstrip('`').lstrip('`').strip()
 
             try:
                 if action_type == "MUSIC":
-                    speaker.speak(f"Включаю {params}")
-                    browser_tool.play_yandex_music(params)
+                    speaker.speak(f"Включаю {clean_params}")
+                    browser_tool.play_yandex_music(clean_params)
 
                 elif action_type == "TERMINAL":
-                    speaker.speak("Выполняю команду")
-                    res = terminal_tool.execute(params)
-                    print(f"🖥️ Терминал: {res.get('stdout') or res.get('stderr')}")
+                    # Для терминала чистим хвосты особенно тщательно
+                    cmd = clean_params.split('`')[0].strip() 
+                    speaker.speak("Выполняю")
+                    res = terminal_tool.execute(cmd)
+                    
+                    output = res.get('stdout') or res.get('stderr')
+                    print(f"🖥️ Терминал: {output}")
+                    
+                    if output:
+                        summary = llm.send_prompt(f"Кратко расскажи результат операции: {output}")
+                        speaker.speak(summary)
 
                 elif action_type == "WRITE_FILE":
-                    if "|" in params:
-                        fname, content = params.split("|", 1)
-                        # Заменяем строковые \n на реальные переносы строк
+                    if "|" in clean_params:
+                        fname, content = clean_params.split("|", 1)
+                        # Убираем возможный хвост из ``` в конце контента файла
                         clean_content = content.strip().replace('\\n', '\n')
+                        if "```" in clean_content:
+                            clean_content = clean_content.split("```")[0].strip()
+                        elif clean_content.endswith("`"):
+                            clean_content = clean_content.rstrip("`").strip()
+                            
                         terminal_tool.write_file(fname.strip(), clean_content)
                         print(f"✅ Файл {fname.strip()} записан.")
                         speaker.speak(f"Файл {fname.strip()} готов.")
                 
                 elif action_type == "CHAT":
-                    speaker.speak(params)
+                    speaker.speak(clean_params)
             
             except Exception as inner_e:
-                print(f"⚠️ Ошибка выполнения команды {action_type}: {inner_e}")
+                print(f"⚠️ Ошибка парсинга внутри {action_type}: {inner_e}")
 
-        # Если команд не найдено, возможно это просто текст без меток
         if not actions and ai_response:
              clean_reply = ai_response.replace("ACTION: [CHAT]", "").replace("PARAMS:", "").strip()
              speaker.speak(clean_reply)
@@ -92,7 +108,7 @@ def process_command(user_text):
     except Exception as e:
         print(f"❌ Ошибка диспетчера: {e}")
 
-# --- ГОЛОСОВОЙ БЛОК ---
+# --- Остальной код (голос, чат, main) остается без изменений ---
 def audio_callback(indata, frames, time, status):
     if is_recording:
         recording_frames.append(np.copy(indata))
@@ -128,7 +144,6 @@ def stop_capture():
     finally:
         if os.path.exists(OUTPUT_AUDIO_FILE): os.remove(OUTPUT_AUDIO_FILE)
 
-# --- ЧАТ В ТЕРМИНАЛЕ ---
 def terminal_input_loop():
     while True:
         try:
@@ -140,7 +155,6 @@ def terminal_input_loop():
         except EOFError:
             break
 
-# --- КЛАВИАТУРА ---
 def on_press(key):
     try:
         if hasattr(key, 'char'):
@@ -153,7 +167,6 @@ def on_release(key):
         if hasattr(key, 'char') and key.char == 'j': stop_capture()
     except: pass
 
-# --- MAIN ---
 if __name__ == "__main__":
     print("\n" + "="*50)
     print("       JARVIS HYBRID SYSTEM (VOICE + TERMINAL)")
@@ -164,9 +177,7 @@ if __name__ == "__main__":
     print("  M -> Silence | ESC -> Exit")
     print("="*50 + "\n")
     
-    # Запуск текстового ввода в фоне
     threading.Thread(target=terminal_input_loop, daemon=True).start()
 
-    # Запуск прослушивания клавиш (основной поток)
     with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
         listener.join()
